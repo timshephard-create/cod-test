@@ -217,6 +217,7 @@ func _run() -> void:
 	check("enter restarts to practice", main.state == main.State.PRACTICE and main.range_targets.filter(func(x): return x.is_up).size() == 9)
 
 	await _movement_tests()
+	await _fx_tests()
 
 	print("AUTOTEST %d/%d checks passed" % [checks - fails, checks])
 	get_tree().quit(1 if fails > 0 else 0)
@@ -353,4 +354,64 @@ func _movement_tests() -> void:
 	key(KEY_SHIFT, false)
 	await wait(1.0)
 	check("FOV back to base after slide + ADS", absf(player.camera.fov - 80.0) < 0.4, "fov=%.2f" % player.camera.fov)
+	await reset_player()
+
+
+## Step 2 (pass 2): layered audio variants, pooled FX, fire shake.
+func _fx_tests() -> void:
+	var fx: Node3D = main.get_tree().get_first_node_in_group("fx")
+	check("fx manager present", fx != null)
+	# Variant cycling: every variant heard before a repeat, never twice running.
+	var seq: Array = []
+	for i in range(8):
+		seq.append(Sfx.pick("rifle_crack"))
+	var first: Array = seq.slice(0, 4)
+	first.sort()
+	var no_repeat := true
+	for i in range(1, seq.size()):
+		if seq[i] == seq[i - 1]:
+			no_repeat = false
+	check("variant cycling covers all variants before repeating", first == [0, 1, 2, 3], str(seq))
+	check("variant cycling never repeats consecutively", no_repeat, str(seq))
+	# Shake: energy after a shot, decays to zero.
+	await reset_player()
+	await aim_at(Vector3(3.0, 1.5, -37.0))
+	mouse(MOUSE_BUTTON_LEFT, true)
+	await tick
+	await tick
+	mouse(MOUSE_BUTTON_LEFT, false)
+	await tick
+	check("fire adds shake energy", player.shake_energy > 0.05, "e=%.3f" % player.shake_energy)
+	await wait(1.0)
+	check("shake decays to zero", player.shake_energy == 0.0 and player.shake_rot == Vector3.ZERO, "e=%.4f" % player.shake_energy)
+	player.add_shake(0.25)
+	check("target drop kick adds shake", player.shake_energy > 0.2)
+	await wait(1.0)
+	# Pools: 500 shots into the backstop allocate nothing and cap decals.
+	var nodes0 := fx.get_child_count()
+	var objs0 := Performance.get_monitor(Performance.OBJECT_NODE_COUNT)
+	var tracers0: int = fx.tracer_count
+	player.ammo["rifle"] = {"mag": 500, "reserve": 0}
+	var rpm0: float = player.def.rpm
+	player.def.rpm = 6000.0
+	var shots0: int = player.stats.shots
+	mouse(MOUSE_BUTTON_LEFT, true)
+	while player.stats.shots - shots0 < 500:
+		await tick
+		player.recoil_target = Vector2.ZERO
+		player.recoil_current = Vector2.ZERO
+	mouse(MOUSE_BUTTON_LEFT, false)
+	player.def.rpm = rpm0
+	await wait(0.3)
+	var nodes1 := fx.get_child_count()
+	var objs1 := Performance.get_monitor(Performance.OBJECT_NODE_COUNT)
+	check("500 shots fired", player.stats.shots - shots0 == 500, "shots=%d" % (player.stats.shots - shots0))
+	check("fx pool node count unchanged over 500 shots", nodes1 == nodes0, "%d -> %d" % [nodes0, nodes1])
+	check("scene node count stable over 500 shots", objs1 - objs0 <= 2, "%d -> %d" % [objs0, objs1])
+	check("decal count capped at pool size", fx.visible_decals() == fx.DECAL_POOL and fx.decal_count >= 500, "visible=%d total=%d" % [fx.visible_decals(), fx.decal_count])
+	check("tracer every 3rd shot", absf((fx.tracer_count - tracers0) - 500.0 / 3.0) <= 2.0, "tracers=%d" % (fx.tracer_count - tracers0))
+	check("bursts pooled per surface", fx.burst_count >= 500 and fx.bursts["concrete"].size() == fx.BURSTS_PER_SURFACE)
+	await wait(0.2)
+	check("tracers hidden after their life", fx.tracers.filter(func(m): return m.visible).size() == 0)
+	player.ammo["rifle"] = {"mag": 30, "reserve": 120}
 	await reset_player()

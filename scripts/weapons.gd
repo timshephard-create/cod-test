@@ -66,9 +66,13 @@ static func rifle() -> Dictionary:
 		"tac_rot": Vector3(0.95, 0.40, -0.30),
 		"slide_pos": Vector3(0.16, -0.26, -0.40),
 		"slide_rot": Vector3(-0.15, 0.35, 0.55),
-		"shot_sfx": "rifle_shot",
 		"shot_db": -2.0,
 		"muzzle": Vector3(0.0, 0.02, -0.66),
+		"shake_amp": 0.22,  # degrees of camera shake per shot (separate from recoil)
+		"shake_decay": 14.0,
+		"shake_freq": 38.0,
+		"shell_delay": 0.22,
+		"flash_size": 1.0,
 	}
 
 
@@ -123,9 +127,13 @@ static func pistol() -> Dictionary:
 		"tac_rot": Vector3(0.85, 0.30, -0.25),
 		"slide_pos": Vector3(0.14, -0.23, -0.34),
 		"slide_rot": Vector3(-0.10, 0.30, 0.45),
-		"shot_sfx": "pistol_shot",
 		"shot_db": -4.0,
 		"muzzle": Vector3(0.0, 0.03, -0.26),
+		"shake_amp": 0.35,
+		"shake_decay": 18.0,
+		"shake_freq": 42.0,
+		"shell_delay": 0.16,
+		"flash_size": 0.75,
 	}
 
 

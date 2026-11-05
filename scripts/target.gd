@@ -106,7 +106,7 @@ func hit(part: String, damage: float, head_mult: float, _pos: Vector3) -> Dictio
 	_last_head = is_head
 	var points := 25 if is_head else 10
 	_flash(is_head)
-	Sfx.play_at("impact", global_position, -2.0, 1.6 if is_head else 1.2, 0.1)
+	Sfx.impact("metal", global_position, -3.0)
 	var killed := false
 	if hp <= 0.0:
 		killed = true

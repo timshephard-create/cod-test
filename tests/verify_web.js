@@ -1,5 +1,12 @@
 const { chromium } = require('playwright');
+const fs = require('fs');
+const path = require('path');
 const SHOTS = process.env.SHOTS || '.';
+// Web budget: the whole docs/ export must stay under this many bytes (logged in NOTES.md).
+const SIZE_CAP = 42 * 1024 * 1024;
+// Frame-time floor at 640x360 ?low under SwiftShader: pass-1 baseline was ~3.7 fps while
+// firing; fail if we drop below 75% of that.
+const MIN_FIRING_FPS = 2.8;
 const W = parseInt(process.env.W || '640'), H = parseInt(process.env.H || '360');
 const LOW = process.env.LOW === '0' ? '' : '?low';
 (async () => {
@@ -105,7 +112,26 @@ const LOW = process.env.LOW === '0' ? '' : '?low';
   await page.waitForTimeout(600);
   s = await state();
   console.log('after resume click:', JSON.stringify({ captured: s.captured, paused: s.paused, state: s.state }));
+  // Frame rate while holding fire (rifle) at the current viewport.
+  await page.keyboard.press('Digit1');
+  await page.waitForTimeout(900);
+  await page.keyboard.press('KeyR');
+  await page.waitForTimeout(2500);
+  await page.mouse.down({ button: 'left' });
+  const ft0 = Date.now(); const ff0 = (await state()).frame;
+  await page.waitForTimeout(3000);
+  const fs1 = await state();
+  await page.mouse.up({ button: 'left' });
+  const firingFps = (fs1.frame - ff0) / ((Date.now() - ft0) / 1000);
+  console.log('firing fps:', firingFps.toFixed(2), 'shots in window:', fs1.shots);
+  const docsDir = path.join(__dirname, '..', 'docs');
+  let size = 0;
+  for (const f of fs.readdirSync(docsDir)) size += fs.statSync(path.join(docsDir, f)).size;
+  console.log('docs/ size:', size, 'bytes, cap', SIZE_CAP);
   const errs = logs.filter(l => !l.startsWith('[log]'));
   console.log('console non-log lines:', errs.length, errs.slice(0, 10).join(' | '));
+  const ok = errs.length === 0 && size <= SIZE_CAP && (LOW === '' || firingFps >= MIN_FIRING_FPS);
+  console.log(ok ? 'WEB CHECK PASS' : 'WEB CHECK FAIL');
   await browser.close();
+  process.exit(ok ? 0 : 1);
 })().catch(e => { console.error(e); process.exit(1); });

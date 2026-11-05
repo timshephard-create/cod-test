@@ -82,6 +82,12 @@ var bob_phase := 0.0
 var bob_amp := 0.0
 var t := 0.0
 var flash_timer := 0.0
+var shake_energy := 0.0
+var shake_rot := Vector3.ZERO
+var shell_times: PackedFloat64Array = PackedFloat64Array()
+var shell_w := 0
+var ray_q: PhysicsRayQueryParameters3D
+var fx: Node3D
 
 var stats := {"shots": 0, "hits": 0, "headshots": 0, "kills": 0}
 
@@ -133,19 +139,17 @@ func _ready() -> void:
 	kick_node.name = "Kick"
 	weapon_root.add_child(kick_node)
 
-	muzzle_flash = MeshInstance3D.new()
-	var fm := BoxMesh.new()
-	fm.size = Vector3(0.09, 0.09, 0.09)
-	muzzle_flash.mesh = fm
-	var fmat := StandardMaterial3D.new()
-	fmat.albedo_color = Color(1.0, 0.75, 0.3)
-	fmat.emission_enabled = true
-	fmat.emission = Color(1.0, 0.6, 0.2)
-	fmat.emission_energy_multiplier = 4.0
-	fmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	muzzle_flash.material_override = fmat
-	muzzle_flash.visible = false
+	fx = get_tree().get_first_node_in_group("fx")
+	if fx:
+		muzzle_flash = fx.make_flash_quad()
+	else:
+		muzzle_flash = MeshInstance3D.new()
+		muzzle_flash.visible = false
 	kick_node.add_child(muzzle_flash)
+	shell_times.resize(8)
+	ray_q = PhysicsRayQueryParameters3D.new()
+	ray_q.collision_mask = 1 | 2
+	ray_q.exclude = [get_rid()]
 	muzzle_light = OmniLight3D.new()
 	muzzle_light.light_color = Color(1.0, 0.7, 0.35)
 	muzzle_light.omni_range = 4.0
@@ -433,7 +437,13 @@ func _process(delta: float) -> void:
 	if since > def.recoil_recover_delay:
 		recoil_target = recoil_target.lerp(Vector2.ZERO, 1.0 - exp(-def.recoil_recover * delta))
 	var aim_sway := Vector2(sin(t * 0.7) * 0.0011 + sin(t * 1.9) * 0.0005, sin(t * 1.1) * 0.0009) * ads_c
-	recoil_pivot.rotation = Vector3(deg_to_rad(recoil_current.x) + aim_sway.x, deg_to_rad(recoil_current.y) + aim_sway.y, 0.0)
+	# Fire shake: high-frequency wobble with its own energy, separate from recoil.
+	shake_energy *= exp(-def.shake_decay * delta)
+	if shake_energy < 0.0005:
+		shake_energy = 0.0
+	var f: float = def.shake_freq
+	shake_rot = Vector3(sin(t * f) * 1.0, sin(t * f * 1.31 + 1.7) * 0.7, sin(t * f * 0.87 + 0.4) * 0.9) * deg_to_rad(shake_energy)
+	recoil_pivot.rotation = Vector3(deg_to_rad(recoil_current.x) + aim_sway.x + shake_rot.x, deg_to_rad(recoil_current.y) + aim_sway.y + shake_rot.y, shake_rot.z)
 	rotation.y = yaw
 	var slide_curve := sin(clampf(slide_t / mv.slide_duration, 0.0, 1.0) * PI) * slide_amount
 	head.rotation.x = pitch
@@ -493,12 +503,19 @@ func _process(delta: float) -> void:
 	kick_node.position = kick_pos
 	kick_node.rotation = kick_rot
 
-	# --- muzzle flash --------------------------------------------------------------------
+	# --- muzzle flash + light flicker --------------------------------------------------
 	if flash_timer > 0.0:
 		flash_timer -= delta
+		muzzle_light.light_energy *= exp(-55.0 * delta)
 		if flash_timer <= 0.0:
 			muzzle_flash.visible = false
 			muzzle_light.light_energy = 0.0
+
+	# --- shell casings (fixed ring, no allocations) -----------------------------------
+	for i in range(shell_times.size()):
+		if shell_times[i] > 0.0 and t >= shell_times[i]:
+			shell_times[i] = 0.0
+			Sfx.play_variant("shell", -20.0, 1.0, 0.1)
 
 
 func _spring(delta: float, k: float, damp: float) -> void:
@@ -546,16 +563,19 @@ func _fire() -> void:
 	kick_vel += Vector3(randf_range(-0.05, 0.05), 0.08, def.kick_back * 42.0)
 	kick_rot_vel += Vector3(def.kick_up * 40.0, randf_range(-0.3, 0.3), randf_range(-1.0, 1.0) * def.kick_roll * 40.0)
 
-	# Flash + audio.
+	# Flash (random size/roll), light flicker, layered shot, shell tick, shake.
 	muzzle_flash.visible = true
-	muzzle_flash.rotation = Vector3(randf() * TAU, 0, randf() * TAU)
-	muzzle_light.light_energy = 2.5
-	flash_timer = 0.035
-	Sfx.play(def.shot_sfx, def.shot_db, 1.0, 0.05)
-	Sfx.play("shot_tail", -16.0, 1.0, 0.1)
+	muzzle_flash.scale = Vector3.ONE * def.flash_size * randf_range(0.7, 1.3)
+	muzzle_flash.rotation = Vector3(0, 0, randf() * TAU)
+	muzzle_light.light_energy = randf_range(2.2, 3.8)
+	flash_timer = 0.04
+	Sfx.shot(def.id, def.shot_db)
+	shell_times[shell_w] = t + def.shell_delay
+	shell_w = (shell_w + 1) % shell_times.size()
+	add_shake(def.shake_amp)
 	fired.emit(def)
 
-	# Hitscan with spread cone.
+	# Hitscan with spread cone (query object is reused, nothing allocated here).
 	var xf := camera.global_transform
 	var dir := -xf.basis.z
 	var ang := deg_to_rad(current_spread()) * sqrt(randf())
@@ -563,9 +583,14 @@ func _fire() -> void:
 	dir = (dir + xf.basis.x * tan(ang) * cos(ph) + xf.basis.y * tan(ang) * sin(ph)).normalized()
 	var from := xf.origin
 	var to := from + dir * 300.0
-	var q := PhysicsRayQueryParameters3D.create(from, to, 1 | 2)
-	q.exclude = [get_rid()]
-	var r := get_world_3d().direct_space_state.intersect_ray(q)
+	ray_q.from = from
+	ray_q.to = to
+	var r := get_world_3d().direct_space_state.intersect_ray(ray_q)
+	var end := to
+	if not r.is_empty():
+		end = r.position
+	if fx and stats.shots % 3 == 0:
+		fx.tracer(muzzle_flash.global_position, end)
 	if r.is_empty():
 		return
 	var col: Object = r.collider
@@ -573,6 +598,8 @@ func _fire() -> void:
 		var tgt: Node = col.get_meta("target")
 		var part: String = col.get_meta("target_part")
 		var res: Dictionary = tgt.hit(part, def.damage, def.head_mult, r.position)
+		if fx:
+			fx.burst("metal", r.position, r.normal)
 		if not res.is_empty():
 			stats.hits += 1
 			if part == "head":
@@ -581,30 +608,16 @@ func _fire() -> void:
 				stats.kills += 1
 			hit_landed.emit(part, res.killed, res.points, r.position)
 	else:
-		Sfx.play_at("impact", r.position, -6.0, 1.0, 0.15)
-		_spawn_impact(r.position, r.normal)
+		var surface: String = col.get_meta("surface") if col.has_meta("surface") else "concrete"
+		Sfx.impact(surface, r.position, -5.0)
+		if fx:
+			fx.decal(r.position, r.normal)
+			fx.burst(surface, r.position, r.normal)
 
 
-func _spawn_impact(pos: Vector3, n: Vector3) -> void:
-	var holder := get_tree().get_first_node_in_group("impacts")
-	if holder == null:
-		return
-	if holder.get_child_count() > 80:
-		holder.get_child(0).queue_free()
-	var mi := MeshInstance3D.new()
-	var m := BoxMesh.new()
-	m.size = Vector3(0.07, 0.07, 0.004)
-	mi.mesh = m
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.08, 0.08, 0.08)
-	mi.material_override = mat
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	holder.add_child(mi)
-	var up := Vector3.UP if absf(n.dot(Vector3.UP)) < 0.9 else Vector3.RIGHT
-	mi.look_at_from_position(pos + n * 0.003, pos + n, up)
-	var tw := mi.create_tween()
-	tw.tween_interval(10.0)
-	tw.tween_callback(mi.queue_free)
+## Adds fire-shake energy (degrees). Used per shot and as a small kick when a target drops.
+func add_shake(amount: float) -> void:
+	shake_energy = minf(shake_energy + amount, def.shake_amp * 3.0 + 0.5)
 
 
 func ammo_text() -> String:

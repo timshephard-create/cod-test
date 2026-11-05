@@ -5,6 +5,7 @@ extends Node3D
 const PlayerScript := preload("res://scripts/player.gd")
 const TargetScript := preload("res://scripts/target.gd")
 const HudScript := preload("res://scripts/hud.gd")
+const FxScript := preload("res://scripts/fx.gd")
 
 const COURSE_LIMIT := 90.0
 const TIME_BONUS_FROM := 75.0
@@ -43,10 +44,9 @@ func _ready() -> void:
 	world.name = "World"
 	world.process_mode = Node.PROCESS_MODE_PAUSABLE
 	add_child(world)
-	var impacts := Node3D.new()
-	impacts.name = "Impacts"
-	impacts.add_to_group("impacts")
-	world.add_child(impacts)
+	var fx := FxScript.new()
+	fx.name = "Fx"
+	world.add_child(fx)
 	_build_level()
 	_build_targets()
 	_build_zones()
@@ -86,10 +86,11 @@ func _mat(c: Color, rough := 0.9) -> StandardMaterial3D:
 	return m
 
 
-func _box(size: Vector3, pos: Vector3, color: Color, rot_y := 0.0, parent: Node3D = null) -> StaticBody3D:
+func _box(size: Vector3, pos: Vector3, color: Color, rot_y := 0.0, parent: Node3D = null, surface := "concrete") -> StaticBody3D:
 	var sb := StaticBody3D.new()
 	sb.collision_layer = 1
 	sb.collision_mask = 0
+	sb.set_meta("surface", surface)
 	var cs := CollisionShape3D.new()
 	var bs := BoxShape3D.new()
 	bs.size = size
@@ -167,7 +168,7 @@ func _build_level() -> void:
 	_box(Vector3(16, 0.1, 1.0), Vector3(0, 0.05, 0.0), Color(1.0, 0.85, 0.4))  # firing line stripe
 	for i in range(3):
 		var x := -5.0 + i * 5.0
-		_box(Vector3(1.2, 1.1, 0.6), Vector3(x, 0.55, 0.6), wood)  # shooting benches
+		_box(Vector3(1.2, 1.1, 0.6), Vector3(x, 0.55, 0.6), wood, 0.0, null, "wood")  # shooting benches
 	_box(Vector3(0.4, h, 40), Vector3(-8.2, h / 2, -16), concrete_d)  # left wall
 	_box(Vector3(0.4, h, 29), Vector3(8.2, h / 2, -10.5), concrete_d)  # right wall (to z=-25)
 	_box(Vector3(0.4, h, 8), Vector3(8.2, h / 2, -32), concrete_d)  # right wall past the door (z -28..-36)
@@ -176,7 +177,7 @@ func _build_level() -> void:
 	_box(Vector3(16.8, h + 2, 0.6), Vector3(0, (h + 2) / 2, -37.3), Color(0.35, 0.32, 0.25))  # backstop
 	for i in range(2):  # lane dividers
 		var x := -2.5 + i * 5.0
-		_box(Vector3(0.15, 1.6, 3.0), Vector3(x, 0.8, 0.6), metal)
+		_box(Vector3(0.15, 1.6, 3.0), Vector3(x, 0.8, 0.6), metal, 0.0, null, "metal")
 	_box(Vector3(4, 0.3, 4), Vector3(0, 0.15, 2.0), Color(0.85, 0.85, 0.85))  # start pad
 	_box(Vector3(2.0, 2.4, 0.4), Vector3(0, 1.2, 4.0), Color(0.1, 0.1, 0.1))  # sign board
 	# Door frame on the right wall at z -25..-28 (gap 3m) with a lintel.
@@ -188,13 +189,13 @@ func _build_level() -> void:
 	_box(Vector3(22, 6.5, 0.5), Vector3(19.2, 3.25, -29.45), brick2)  # south wall (z=-29.2)
 	_box(Vector3(0.5, 6.5, 5), Vector3(30.25, 3.25, -29.0), plaster)  # end wall segment (south of turn)
 	# Props in A.
-	_box(Vector3(1.2, 1.0, 1.2), Vector3(13, 0.5, -28.3), wood)
-	_box(Vector3(1.0, 0.8, 1.0), Vector3(14.2, 0.4, -28.5), wood)
-	_box(Vector3(1.2, 1.0, 1.2), Vector3(13, 1.5, -28.3), wood)
-	_box(Vector3(2.0, 1.4, 1.0), Vector3(21, 0.7, -25.4), green)  # dumpster
+	_box(Vector3(1.2, 1.0, 1.2), Vector3(13, 0.5, -28.3), wood, 0.0, null, "wood")
+	_box(Vector3(1.0, 0.8, 1.0), Vector3(14.2, 0.4, -28.5), wood, 0.0, null, "wood")
+	_box(Vector3(1.2, 1.0, 1.2), Vector3(13, 1.5, -28.3), wood, 0.0, null, "wood")
+	_box(Vector3(2.0, 1.4, 1.0), Vector3(21, 0.7, -25.4), green, 0.0, null, "metal")  # dumpster
 	_box(Vector3(0.5, 2.6, 0.5), Vector3(25, 1.3, -26.0), concrete)  # pillar
 	for i in range(4):  # window ledges / AC units on the north wall
-		_box(Vector3(1.4, 0.5, 0.6), Vector3(11.0 + i * 5.0, 3.6, -24.5), metal)
+		_box(Vector3(1.4, 0.5, 0.6), Vector3(11.0 + i * 5.0, 3.6, -24.5), metal, 0.0, null, "metal")
 
 	# ---- Alley B: runs -z from z=-25 to z=-49 at x 28..32 ----
 	_box(Vector3(4.4, 0.4, 24), Vector3(30, -0.2, -37), Color(0.33, 0.33, 0.34))
@@ -202,9 +203,9 @@ func _build_level() -> void:
 	_box(Vector3(0.5, 6.5, 2.0), Vector3(32.25, 3.25, -26.0), brick2)  # east wall stub near turn
 	_box(Vector3(0.5, 6.5, 2.0), Vector3(32.25, 3.25, -28.5), brick2)
 	_box(Vector3(0.5, 6.5, 20), Vector3(27.75, 3.25, -39.5), plaster)  # west wall (z -29.5 .. -49.5)
-	_box(Vector3(1.0, 1.0, 1.0), Vector3(28.6, 0.5, -34), wood)
-	_box(Vector3(1.0, 0.6, 1.0), Vector3(31.4, 0.3, -40), wood)
-	_box(Vector3(1.8, 1.0, 0.9), Vector3(29.0, 0.5, -45), green)
+	_box(Vector3(1.0, 1.0, 1.0), Vector3(28.6, 0.5, -34), wood, 0.0, null, "wood")
+	_box(Vector3(1.0, 0.6, 1.0), Vector3(31.4, 0.3, -40), wood, 0.0, null, "wood")
+	_box(Vector3(1.8, 1.0, 0.9), Vector3(29.0, 0.5, -45), green, 0.0, null, "metal")
 	_box(Vector3(0.5, 6.5, 0.5), Vector3(31.0, 3.25, -37.5), concrete)  # drainpipe-ish column
 
 	# ---- Alley C: runs +x from x=28 to x=50 at z -47..-51 ----
@@ -213,11 +214,11 @@ func _build_level() -> void:
 	_box(Vector3(22.5, 6.5, 0.5), Vector3(39.0, 3.25, -51.25), brick2)  # south wall
 	_box(Vector3(0.5, 6.5, 5), Vector3(50.25, 3.25, -49.0), plaster)  # end wall
 	_box(Vector3(0.5, 6.5, 4), Vector3(27.75, 3.25, -49.5), plaster)  # west closure
-	_box(Vector3(1.0, 1.2, 1.0), Vector3(36, 0.6, -50.5), wood)
-	_box(Vector3(2.4, 1.3, 1.0), Vector3(44, 0.65, -47.5), green)
+	_box(Vector3(1.0, 1.2, 1.0), Vector3(36, 0.6, -50.5), wood, 0.0, null, "wood")
+	_box(Vector3(2.4, 1.3, 1.0), Vector3(44, 0.65, -47.5), green, 0.0, null, "metal")
 	_box(Vector3(3, 0.3, 3), Vector3(48, 0.15, -49), Color(0.85, 0.85, 0.85))  # finish pad
 	# Elevated spot in C: a raised ledge where a high target sits.
-	_box(Vector3(2.0, 0.3, 1.2), Vector3(41, 2.8, -47.2), metal)
+	_box(Vector3(2.0, 0.3, 1.2), Vector3(41, 2.8, -47.2), metal, 0.0, null, "metal")
 
 
 func _add_target(pos: Vector3, rot_y: float, respawn: bool, group: String) -> Node3D:
@@ -380,7 +381,8 @@ func _on_fired(_def: Dictionary) -> void:
 
 
 func _on_target_downed(_tg: Node3D, _headshot: bool) -> void:
-	pass
+	# Subtle camera kick when a target drops.
+	player.add_shake(0.25)
 
 
 func _load_best() -> void:
@@ -506,6 +508,7 @@ func _publish() -> void:
 		"tac": player.tac_sprinting,
 		"sliding": player.sliding,
 		"fov_kick": snappedf(player.fov_kick, 0.1),
+		"shake": snappedf(player.shake_energy, 0.001),
 		"sprint_out": snappedf(player.sprint_out_timer, 0.01),
 		"pos": [snappedf(player.position.x, 0.1), snappedf(player.position.y, 0.1), snappedf(player.position.z, 0.1)],
 		"yaw": snappedf(player.yaw, 0.001),

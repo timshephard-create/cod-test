@@ -68,6 +68,11 @@ def soft_clip(x, drive=1.0):
     return np.tanh(x * drive)
 
 
+def tick(freq, dur, decay, harm=0.0):
+    s = sine(freq, dur) + harm * sine(freq * 2.01, dur)
+    return s * env_exp(dur, decay)
+
+
 def normalize(x, peak=0.9):
     m = np.max(np.abs(x)) or 1.0
     return x / m * peak
@@ -86,35 +91,64 @@ def write(name, data):
     print("wrote", path, f"{len(pcm) / SR:.2f}s")
 
 
-# --- Gunshots -----------------------------------------------------------------
+# --- Gunshots: three layers x several variants per weapon ------------------------
+# crack  = supersonic snap / mechanical transient (very short, bright)
+# body   = muzzle blast (band-limited noise, pitch-dropping thump)
+# tail   = room / distance tail (dark noise, long decay, built-in pre-delay)
 
-def gunshot(dur, crack_cut, thump_f0, thump_f1, thump_decay, body_decay, tail_decay, drive):
+def crack(dur, cut, decay, seed):
+    r = np.random.default_rng(seed)
+    n = r.standard_normal(int(SR * dur))
     x = t(dur)
-    # Supersonic crack: very short bright transient.
-    crack = highpass(noise(dur), 1500) * env_exp(dur, 0.006)
-    # Muzzle blast body: band-limited noise with a cutoff that sweeps down.
-    cut = crack_cut * np.exp(-x / body_decay) + 300
-    body = lowpass(noise(dur), cut) * env_exp(dur, body_decay) * 3.0
-    # Low thump: pitch-dropping sine.
+    c = highpass(n, cut) * env_exp(dur, decay)
+    c += sine(cut * 0.6 * np.exp(-x / 0.004) + 900, dur) * env_exp(dur, decay * 0.8) * 0.5
+    return soft_clip(c * 2.5, 1.5)
+
+
+def blast(dur, cut0, thump_f0, thump_f1, thump_decay, body_decay, drive, seed):
+    r = np.random.default_rng(seed)
+    n = r.standard_normal(int(SR * dur))
+    x = t(dur)
+    cut = cut0 * np.exp(-x / body_decay) + 250
+    body = lowpass(n, cut) * env_exp(dur, body_decay) * 3.0
     f = thump_f0 * np.exp(-x / 0.03) + thump_f1
     thump = sine(f, dur) * env_exp(dur, thump_decay) * 1.6
-    # Room tail: darker noise with long decay.
-    tail = lowpass(noise(dur), 900) * env_exp(dur, tail_decay, attack=0.01) * 0.9
-    s = mix(crack * 1.2, body, thump, tail)
-    return soft_clip(s, drive)
+    return soft_clip(mix(body, thump), drive)
 
 
-write("rifle_shot", gunshot(0.42, 6000, 220, 55, 0.07, 0.045, 0.16, 1.6))
-write("pistol_shot", gunshot(0.30, 7500, 300, 80, 0.045, 0.03, 0.10, 1.4))
-# Distant/softer variant used for the reverb "slapback" layer.
-write("shot_tail", lowpass(noise(0.6), 700) * env_exp(0.6, 0.18, attack=0.02))
+def tail(dur, cut, decay, predelay, seed, flutter=0.0):
+    r = np.random.default_rng(seed)
+    n = r.standard_normal(int(SR * dur))
+    x = t(dur)
+    s = lowpass(n, cut) * env_exp(dur, decay, attack=0.015)
+    if flutter:
+        s *= 1.0 + flutter * np.sin(2 * math.pi * 23.0 * x) * np.exp(-x / 0.2)
+    s = np.concatenate([np.zeros(int(SR * predelay)), s])
+    return s
+
+
+for i in range(4):
+    write(f"rifle_crack_{i}", crack(0.05, 2200 + 300 * i, 0.005 + 0.0008 * i, 100 + i))
+    write(f"rifle_body_{i}", blast(0.30, 6000 + 500 * i, 230 - 10 * i, 55 + 4 * i, 0.07, 0.045 + 0.004 * i, 1.6, 200 + i))
+    write(f"pistol_crack_{i}", crack(0.04, 3200 + 300 * i, 0.004 + 0.0006 * i, 300 + i))
+    write(f"pistol_body_{i}", blast(0.22, 7500 + 400 * i, 320 - 15 * i, 85 + 5 * i, 0.04, 0.028 + 0.003 * i, 1.4, 400 + i))
+for i in range(3):
+    write(f"rifle_tail_{i}", tail(0.7, 900 - 80 * i, 0.17 + 0.02 * i, 0.03, 500 + i, flutter=0.3))
+    # Sidearm tail: shorter, darker, "suppressed" thup with no flutter.
+    write(f"pistol_tail_{i}", tail(0.35, 450 - 40 * i, 0.08 + 0.01 * i, 0.02, 600 + i))
+
+# Shell casing tick: bright metallic ping followed by a bounce.
+for i in range(3):
+    sh = np.zeros(int(SR * 0.25))
+    a = tick(5200 + 400 * i, 0.08, 0.012, 0.5)
+    b = tick(6100 + 300 * i, 0.06, 0.008, 0.3) * 0.5
+    sh[: len(a)] += a
+    o = int(SR * (0.09 + 0.02 * i))
+    sh[o : o + len(b)] += b
+    write(f"shell_{i}", sh)
 
 
 # --- Feedback ticks -----------------------------------------------------------
-
-def tick(freq, dur, decay, harm=0.0):
-    s = sine(freq, dur) + harm * sine(freq * 2.01, dur)
-    return s * env_exp(dur, decay)
 
 
 # Hitmarker: the iconic double "tik-tik" — two short bright clicks.
@@ -170,8 +204,14 @@ clank = mix(
 write("target_fall", clank)
 write("target_up", mix(clack(0.12, 1500, 0.03, 120), tick(600, 0.2, 0.04) * 0.3))
 
-# Bullet impact on concrete / metal.
-write("impact", mix(clack(0.08, 3500, 0.012), lowpass(noise(0.08), 500) * env_exp(0.08, 0.02) * 0.6))
+# Bullet impacts per surface class.
+for i in range(3):
+    # Concrete: dull chip + dust hiss.
+    write(f"impact_concrete_{i}", mix(clack(0.09, 3200 + 300 * i, 0.012), lowpass(noise(0.09), 500 + 50 * i) * env_exp(0.09, 0.022) * 0.6))
+    # Metal: ringing ping with inharmonic partials.
+    write(f"impact_metal_{i}", mix(tick(1900 + 150 * i, 0.3, 0.06, 0.5), tick(3100 + 200 * i, 0.3, 0.035) * 0.5, tick(4700 - 100 * i, 0.3, 0.02) * 0.3, clack(0.05, 4000, 0.008) * 0.8))
+    # Wood: hollow knock with splinter crack.
+    write(f"impact_wood_{i}", mix(sine(260 + 20 * i, 0.12) * env_exp(0.12, 0.03), clack(0.08, 1800 + 100 * i, 0.015) * 0.9, highpass(noise(0.03), 3000) * env_exp(0.03, 0.004) * 0.4))
 
 # Footsteps: soft thud.
 write("footstep", mix(lowpass(noise(0.12), 400) * env_exp(0.12, 0.03), clack(0.05, 2000, 0.006) * 0.3))
