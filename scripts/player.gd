@@ -10,6 +10,8 @@ signal weapon_changed(def: Dictionary)
 
 const Weapons := preload("res://scripts/weapons.gd")
 const Movement := preload("res://scripts/movement.gd")
+const Anims := preload("res://scripts/anims.gd")
+const Hands := preload("res://scripts/hands.gd")
 
 const BASE_FOV := 80.0
 const SENS := 0.0021
@@ -22,6 +24,12 @@ var weapon_index := 0
 var def: Dictionary
 var ammo: Dictionary = {}
 var models: Dictionary = {}
+var loco_nodes: Dictionary = {}
+var action_players: Dictionary = {}
+var loco_players: Dictionary = {}
+var hands: Node3D
+var cur_loco := ""
+var ads_active_prev := false
 
 var look_enabled := false
 var input_enabled := true
@@ -64,7 +72,6 @@ var swapping := false
 var swap_t := 0.0
 var swap_phase := 0
 var swap_to := -1
-var lower_amount := 0.0
 
 var pattern_index := 0
 var last_shot_time := -10.0
@@ -160,19 +167,42 @@ func _ready() -> void:
 	defs = [Weapons.rifle(), Weapons.pistol()]
 	for d in defs:
 		ammo[d.id] = {"mag": d.mag, "reserve": d.reserve}
+		# Kick -> Loco_<id> [loco clips] -> AnimPose_<id> [action clips] -> Model_<id>
+		var loco := Node3D.new()
+		loco.name = "Loco_" + d.id
+		loco.visible = false
+		kick_node.add_child(loco)
+		var apose := Node3D.new()
+		apose.name = "AnimPose_" + d.id
+		loco.add_child(apose)
 		var m := Weapons.build_model(d)
 		m.scale = Vector3.ONE * d.model_scale
-		m.visible = false
-		kick_node.add_child(m)
+		apose.add_child(m)
+		var ap := AnimationPlayer.new()
+		ap.name = "Action"
+		ap.add_animation_library("", Anims.action_library(d))
+		apose.add_child(ap)
+		var lp := AnimationPlayer.new()
+		lp.name = "Loco"
+		lp.add_animation_library("", Anims.loco_library(d))
+		loco.add_child(lp)
 		models[d.id] = m
+		loco_nodes[d.id] = loco
+		action_players[d.id] = ap
+		loco_players[d.id] = lp
+	hands = Hands.new()
+	hands.name = "Arms"
+	sway_pivot.add_child(hands)
 	_equip(0)
 
 
 func _equip(i: int) -> void:
 	weapon_index = i
 	def = defs[i]
-	for k in models:
-		models[k].visible = (k == def.id)
+	for k in loco_nodes:
+		loco_nodes[k].visible = (k == def.id)
+	hands.set_targets(models[def.id].get_node("GripRBase/GripR"), models[def.id].get_node("GripLBase/GripL"))
+	cur_loco = ""
 	muzzle_flash.position = def.muzzle * def.model_scale
 	muzzle_light.position = def.muzzle * def.model_scale + Vector3(0, 0.02, -0.05)
 	pattern_index = 0
@@ -241,6 +271,7 @@ func _request_swap(i: int) -> void:
 	swap_t = 0.0
 	swap_to = i
 	reloading = false
+	action_players[def.id].play("lower")
 	Sfx.play("swap", -10.0, 1.0, 0.05)
 
 
@@ -256,6 +287,15 @@ func _request_reload() -> void:
 	reload_flags = {}
 	ads_held = false
 	tac_sprinting = false
+	action_players[def.id].play("reload_empty" if reload_empty else "reload")
+
+
+## Plays a short action clip only when nothing timing-critical (reload / swap) is running.
+func _play_free(name: String) -> void:
+	var ap: AnimationPlayer = action_players[def.id]
+	if ap.is_playing() and ap.current_animation in ["reload", "reload_empty", "lower", "raise"]:
+		return
+	ap.play(name)
 
 
 func _start_slide() -> void:
@@ -359,6 +399,9 @@ func _process(delta: float) -> void:
 
 	# --- ADS + FOV ------------------------------------------------------------
 	var can_ads := input_enabled and ads_held and not sprinting and not reloading and not swapping
+	if can_ads != ads_active_prev:
+		ads_active_prev = can_ads
+		_play_free("ads_in" if can_ads else "ads_out")
 	ads_amount = move_toward(ads_amount, 1.0 if can_ads else 0.0, delta / def.ads_time)
 	var ads_c := smoothstep(0.0, 1.0, ads_amount)
 	var kick_target := 0.0
@@ -397,16 +440,14 @@ func _process(delta: float) -> void:
 	if swapping:
 		swap_t += delta
 		if swap_phase == 0:
-			lower_amount = clampf(swap_t / def.lower_time, 0.0, 1.0)
 			if swap_t >= def.lower_time:
 				_equip(swap_to)
+				action_players[def.id].play("raise")
 				swap_phase = 1
 				swap_t = 0.0
 		else:
-			lower_amount = 1.0 - clampf(swap_t / def.raise_time, 0.0, 1.0)
 			if swap_t >= def.raise_time:
 				swapping = false
-				lower_amount = 0.0
 
 	# --- fire ---------------------------------------------------------------------
 	var wants_fire := trigger_held if def.auto else trigger_edge
@@ -461,19 +502,22 @@ func _process(delta: float) -> void:
 	rot = rot.lerp(def.tac_rot, tac_amount)
 	pos = pos.lerp(def.slide_pos, slide_amount * (1.0 - ads_c))
 	rot = rot.lerp(def.slide_rot, slide_amount * (1.0 - ads_c))
-	if reloading:
-		var total: float = def.reload_time + (def.empty_extra if reload_empty else 0.0)
-		var p := clampf(reload_t / total, 0.0, 1.0)
-		var s := sin(p * PI)
-		rot += Vector3(-0.28 * s, 0.10 * s, 0.42 * s)
-		pos += Vector3(0.02 * s, -0.06 * s, 0.02 * s)
-		if reload_empty and reload_t > def.reload_time:
-			var q := clampf((reload_t - def.reload_time) / def.empty_extra, 0.0, 1.0)
-			pos += Vector3(0, 0, 0.03 * sin(q * PI))
-	pos += Vector3(0.0, -0.32, 0.05) * lower_amount
-	rot += Vector3(-0.75, 0.0, 0.0) * lower_amount
 	weapon_root.position = pos
 	weapon_root.rotation = rot
+	# Reload tilt, swap lower/raise, fire off-hand kick and ADS settle are authored clips
+	# on AnimPose_<id>; locomotion loops run on Loco_<id>. Both add over the kick spring.
+	var want_loco := "idle"
+	if sliding:
+		want_loco = "slide"
+	elif tac_sprinting:
+		want_loco = "tac"
+	elif sprinting:
+		want_loco = "sprint"
+	elif Vector2(velocity.x, velocity.z).length() > 0.5 and is_on_floor():
+		want_loco = "walk"
+	if want_loco != cur_loco:
+		cur_loco = want_loco
+		loco_players[def.id].play(want_loco, 0.15)
 
 	# --- sway + bob --------------------------------------------------------------------
 	var sway_scale := lerpf(1.0, 0.18, ads_c)
@@ -573,6 +617,7 @@ func _fire() -> void:
 	shell_times[shell_w] = t + def.shell_delay
 	shell_w = (shell_w + 1) % shell_times.size()
 	add_shake(def.shake_amp)
+	_play_free("fire")
 	fired.emit(def)
 
 	# Hitscan with spread cone (query object is reused, nothing allocated here).

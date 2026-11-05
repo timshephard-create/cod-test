@@ -68,6 +68,16 @@ static func rifle() -> Dictionary:
 		"slide_rot": Vector3(-0.15, 0.35, 0.55),
 		"shot_db": -2.0,
 		"muzzle": Vector3(0.0, 0.02, -0.66),
+		# Rig anchors (model space, before model_scale): hand targets, magazine, bolt.
+		"grip_r_pos": Vector3(0.0, -0.12, 0.13),
+		"grip_r_rot": Vector3(-0.35, 0, 0),
+		"grip_l_pos": Vector3(-0.01, -0.06, -0.30),
+		"grip_l_rot": Vector3(0, 0, 0.3),
+		"mag_pos": Vector3(0, -0.12, -0.02),
+		"mag_rot": Vector3(0.12, 0, 0),
+		"mag_drop": Vector3(0.0, -0.28, 0.06),
+		"bolt_pos": Vector3(0.045, 0.0, 0.05),
+		"bolt_pull": Vector3(0, 0, 0.07),
 		"shake_amp": 0.22,  # degrees of camera shake per shot (separate from recoil)
 		"shake_decay": 14.0,
 		"shake_freq": 38.0,
@@ -129,12 +139,40 @@ static func pistol() -> Dictionary:
 		"slide_rot": Vector3(-0.10, 0.30, 0.45),
 		"shot_db": -4.0,
 		"muzzle": Vector3(0.0, 0.03, -0.26),
+		"grip_r_pos": Vector3(0.0, -0.085, 0.045),
+		"grip_r_rot": Vector3(-0.3, 0, 0),
+		"grip_l_pos": Vector3(-0.025, -0.1, 0.035),
+		"grip_l_rot": Vector3(-0.3, 0.3, 0.6),
+		"mag_pos": Vector3(0, -0.075, 0.035),
+		"mag_rot": Vector3(-0.3, 0, 0),
+		"mag_drop": Vector3(0.0, -0.16, 0.03),
+		"bolt_pos": Vector3(0, 0.01, -0.08),
+		"bolt_pull": Vector3(0, 0, 0.045),
 		"shake_amp": 0.35,
 		"shake_decay": 18.0,
 		"shake_freq": 42.0,
 		"shell_delay": 0.16,
 		"flash_size": 0.75,
 	}
+
+
+static func _node(parent: Node3D, name: String, pos: Vector3, rot := Vector3.ZERO) -> Node3D:
+	var n := Node3D.new()
+	n.name = name
+	n.position = pos
+	n.rotation = rot
+	parent.add_child(n)
+	return n
+
+
+## Hand targets: GripRBase/GripR and GripLBase/GripL. Locomotion clips animate the
+## *Base nodes, action clips (reload, fire, ads) animate the inner nodes, so both
+## layers add without fighting over one property.
+static func _grips(root: Node3D, r_pos: Vector3, r_rot: Vector3, l_pos: Vector3, l_rot: Vector3) -> void:
+	var rb := _node(root, "GripRBase", Vector3.ZERO)
+	_node(rb, "GripR", r_pos, r_rot)
+	var lb := _node(root, "GripLBase", Vector3.ZERO)
+	_node(lb, "GripL", l_pos, l_rot)
 
 
 static func _box(parent: Node3D, size: Vector3, pos: Vector3, color: Color, rot := Vector3.ZERO) -> MeshInstance3D:
@@ -162,12 +200,15 @@ static func build_model(def: Dictionary) -> Node3D:
 		_box(root, Vector3(0.06, 0.065, 0.30), Vector3(0, 0.0, -0.31), TAN)  # handguard
 		_box(root, Vector3(0.024, 0.024, 0.30), Vector3(0, 0.02, -0.52), STEEL)  # barrel
 		_box(root, Vector3(0.03, 0.03, 0.06), Vector3(0, 0.02, -0.66), GUNMETAL)  # muzzle device
-		_box(root, Vector3(0.035, 0.19, 0.075), Vector3(0, -0.12, -0.02), POLYMER, Vector3(0.12, 0, 0))  # magazine
+		var mag := _node(root, "Mag", def.mag_pos, def.mag_rot)
+		_box(mag, Vector3(0.035, 0.19, 0.075), Vector3.ZERO, POLYMER)  # magazine
 		_box(root, Vector3(0.04, 0.11, 0.045), Vector3(0, -0.09, 0.12), POLYMER, Vector3(-0.35, 0, 0))  # grip
 		_box(root, Vector3(0.045, 0.06, 0.26), Vector3(0, -0.01, 0.30), POLYMER)  # stock
 		_box(root, Vector3(0.05, 0.12, 0.04), Vector3(0, -0.02, 0.42), POLYMER)  # butt pad
 		_box(root, Vector3(0.05, 0.015, 0.34), Vector3(0, 0.05, 0.0), GUNMETAL)  # top rail
-		_box(root, Vector3(0.02, 0.02, 0.02), Vector3(0.045, 0.0, 0.05), STEEL)  # charging handle
+		var bolt := _node(root, "Bolt", def.bolt_pos)
+		_box(bolt, Vector3(0.02, 0.02, 0.02), Vector3.ZERO, STEEL)  # charging handle
+		_grips(root, def.grip_r_pos, def.grip_r_rot, def.grip_l_pos, def.grip_l_rot)
 		# Rear aperture: four thin bars forming a square hole centred at y=0.075.
 		var ry := 0.075
 		var rz := 0.05
@@ -183,9 +224,13 @@ static func build_model(def: Dictionary) -> Node3D:
 		_box(root, Vector3(0.005, 0.035, 0.008), Vector3(-0.014, 0.062, fz), GUNMETAL)
 		_box(root, Vector3(0.034, 0.012, 0.01), Vector3(0, 0.047, fz), GUNMETAL)
 	else:
-		_box(root, Vector3(0.034, 0.045, 0.19), Vector3(0, 0.01, -0.08), GUNMETAL)  # slide
+		var slide := _node(root, "Bolt", def.bolt_pos)
+		_box(slide, Vector3(0.034, 0.045, 0.19), Vector3.ZERO, GUNMETAL)  # slide
 		_box(root, Vector3(0.03, 0.035, 0.16), Vector3(0, -0.02, -0.05), POLYMER)  # frame
 		_box(root, Vector3(0.034, 0.075, 0.04), Vector3(0, -0.07, 0.03), POLYMER, Vector3(-0.3, 0, 0))  # grip
+		var mag := _node(root, "Mag", def.mag_pos, def.mag_rot)
+		_box(mag, Vector3(0.024, 0.07, 0.03), Vector3.ZERO, GUNMETAL)  # magazine (inside the grip)
+		_grips(root, def.grip_r_pos, def.grip_r_rot, def.grip_l_pos, def.grip_l_rot)
 		_box(root, Vector3(0.016, 0.016, 0.03), Vector3(0, 0.012, -0.185), STEEL)  # muzzle
 		_box(root, Vector3(0.012, 0.025, 0.02), Vector3(0, -0.035, -0.06), GUNMETAL)  # trigger guard bar
 		var ry := 0.052

@@ -218,6 +218,7 @@ func _run() -> void:
 
 	await _movement_tests()
 	await _fx_tests()
+	await _anim_tests()
 
 	print("AUTOTEST %d/%d checks passed" % [checks - fails, checks])
 	get_tree().quit(1 if fails > 0 else 0)
@@ -414,4 +415,126 @@ func _fx_tests() -> void:
 	await wait(0.2)
 	check("tracers hidden after their life", fx.tracers.filter(func(m): return m.visible).size() == 0)
 	player.ammo["rifle"] = {"mag": 30, "reserve": 120}
+	await reset_player()
+
+
+func _track_has_key(a: Animation, path_part: String, time: float) -> bool:
+	for i in range(a.get_track_count()):
+		if str(a.track_get_path(i)).contains(path_part):
+			if a.track_find_key(i, time, Animation.FIND_MODE_APPROX) >= 0:
+				return true
+	return false
+
+
+## True when the view model is on screen: the receiver origin or the muzzle projects
+## inside the viewport and nothing of the rig sits behind the camera.
+func view_model_on_screen(label: String) -> void:
+	var cam: Camera3D = player.camera
+	var rect := Rect2(Vector2.ZERO, cam.get_viewport().get_visible_rect().size)
+	var model: Node3D = player.models[player.def.id]
+	var pts := [model.global_position, player.muzzle_flash.global_position]
+	var inside := 0
+	var behind := false
+	for p in pts:
+		if cam.is_position_behind(p):
+			behind = true
+		elif rect.has_point(cam.unproject_position(p)):
+			inside += 1
+	for arm in ["r", "l"]:
+		if cam.is_position_behind(player.hands.arms[arm].hand.global_position):
+			behind = true
+	check("view model on screen: " + label, inside > 0 and not behind, "inside=%d behind=%s origin=%s" % [inside, behind, str(cam.unproject_position(pts[0]).round()) if not cam.is_position_behind(pts[0]) else "behind"])
+
+
+## Step 3 (pass 2): authored first-person clips + IK hands.
+func _anim_tests() -> void:
+	await reset_player()
+	check("arm rig built (2 arms x upper, fore, hand)", player.hands.get_child_count() == 6)
+	for d in player.defs:
+		var ap: AnimationPlayer = player.action_players[d.id]
+		var lp: AnimationPlayer = player.loco_players[d.id]
+		check("%s reload clip length == reload_time" % d.id, is_equal_approx(ap.get_animation("reload").length, d.reload_time), "%.3f" % ap.get_animation("reload").length)
+		check("%s empty reload clip length == reload_time + empty_extra" % d.id, is_equal_approx(ap.get_animation("reload_empty").length, d.reload_time + d.empty_extra))
+		check("%s reload clip keys the mag at mag_in_t" % d.id, _track_has_key(ap.get_animation("reload"), "Mag", d.mag_in_t))
+		check("%s reload clip starts the mag drop at mag_out_t" % d.id, _track_has_key(ap.get_animation("reload"), "Mag", d.mag_out_t - 0.05))
+		check("%s empty reload racks the bolt after reload_time" % d.id, _track_has_key(ap.get_animation("reload_empty"), "Bolt", d.reload_time + 0.22))
+		check("%s lower clip length == lower_time" % d.id, is_equal_approx(ap.get_animation("lower").length, d.lower_time))
+		check("%s raise clip length == raise_time" % d.id, is_equal_approx(ap.get_animation("raise").length, d.raise_time))
+		check("%s ads clip length == ads_time" % d.id, is_equal_approx(ap.get_animation("ads_in").length, d.ads_time) and is_equal_approx(ap.get_animation("ads_out").length, d.ads_time))
+		check("%s loco loops present" % d.id, lp.has_animation("idle") and lp.has_animation("walk") and lp.has_animation("sprint") and lp.has_animation("tac") and lp.has_animation("slide"))
+	# Reload clip runs in lockstep with the gameplay timer.
+	await aim_at(Vector3(3.0, 1.5, -37.0))
+	mouse(MOUSE_BUTTON_LEFT, true)
+	await tick
+	await tick
+	mouse(MOUSE_BUTTON_LEFT, false)
+	await wait(0.1)
+	var ap_r: AnimationPlayer = player.action_players["rifle"]
+	check("fire plays the off-hand kick clip", ap_r.current_animation == "fire" or ap_r.assigned_animation == "fire", ap_r.current_animation)
+	await wait(0.5)
+	await press(KEY_R)
+	await wait(0.6)
+	check("reload clip playing during reload", ap_r.is_playing() and ap_r.current_animation == "reload", ap_r.current_animation)
+	check("reload clip position tracks reload_t", absf(ap_r.current_animation_position - player.reload_t) < 0.04, "clip=%.3f t=%.3f" % [ap_r.current_animation_position, player.reload_t])
+	await view_model_on_screen("rifle reload (mid)")
+	var mag_node: Node3D = player.models["rifle"].get_node("Mag")
+	check("magazine is out of the well mid-reload", mag_node.position.distance_to(player.def.mag_pos) > 0.1, "d=%.3f" % mag_node.position.distance_to(player.def.mag_pos))
+	await wait(1.6)
+	check("reload clip finished with the reload", not player.reloading and not ap_r.is_playing())
+	check("magazine back in the well", mag_node.position.distance_to(player.def.mag_pos) < 0.002)
+	# Empty reload racks the bolt.
+	player.ammo["rifle"] = {"mag": 0, "reserve": 90}
+	await press(KEY_R)
+	await wait(0.2)
+	check("empty reload plays the empty clip", ap_r.current_animation == "reload_empty")
+	await wait(player.def.reload_time + 0.22 - 0.2)
+	var bolt: Node3D = player.models["rifle"].get_node("Bolt")
+	check("bolt pulled back during the empty-reload extra phase", bolt.position.distance_to(player.def.bolt_pos) > 0.04, "d=%.3f" % bolt.position.distance_to(player.def.bolt_pos))
+	await wait(0.6)
+	check("bolt returned, empty reload done", not player.reloading and bolt.position.distance_to(player.def.bolt_pos) < 0.002)
+	# Swap: lower on the old weapon, raise on the new, matching the swap timers.
+	await press(KEY_2)
+	await wait(0.1)
+	check("swap plays lower on the outgoing weapon", ap_r.current_animation == "lower" and ap_r.is_playing())
+	await view_model_on_screen("rifle lowering (mid swap)")
+	await wait(player.defs[0].lower_time)
+	var ap_p: AnimationPlayer = player.action_players["pistol"]
+	check("swap plays raise on the incoming weapon", player.def.id == "pistol" and ap_p.current_animation == "raise" and ap_p.is_playing(), ap_p.current_animation)
+	await view_model_on_screen("pistol raising (mid swap)")
+	await wait(player.def.raise_time + 0.05)
+	check("raise finished with the swap", not player.swapping and not ap_p.is_playing())
+	await view_model_on_screen("pistol hip")
+	mouse(MOUSE_BUTTON_RIGHT, true)
+	await wait(0.4)
+	await view_model_on_screen("pistol ADS")
+	mouse(MOUSE_BUTTON_RIGHT, false)
+	await wait(0.3)
+	await press(KEY_1)
+	await wait(0.9)
+	# Locomotion loops follow the movement state; view model stays on screen in each.
+	await view_model_on_screen("rifle hip idle")
+	check("idle loop", player.loco_players["rifle"].current_animation == "idle")
+	key(KEY_W, true)
+	await wait(0.4)
+	check("walk loop", player.loco_players["rifle"].current_animation == "walk")
+	await view_model_on_screen("rifle walk")
+	key(KEY_SHIFT, true)
+	await wait(0.5)
+	check("sprint loop", player.loco_players["rifle"].current_animation == "sprint")
+	await view_model_on_screen("rifle sprint")
+	key(KEY_SHIFT, false)
+	key(KEY_SHIFT, true)
+	await wait(0.5)
+	check("tac sprint loop", player.loco_players["rifle"].current_animation == "tac")
+	await view_model_on_screen("rifle tactical sprint")
+	await press(KEY_C)
+	await wait(0.3)
+	check("slide loop", player.loco_players["rifle"].current_animation == "slide")
+	await view_model_on_screen("rifle slide")
+	await wait(0.6)
+	await reset_player()
+	mouse(MOUSE_BUTTON_RIGHT, true)
+	await wait(0.4)
+	await view_model_on_screen("rifle ADS")
+	mouse(MOUSE_BUTTON_RIGHT, false)
 	await reset_player()
