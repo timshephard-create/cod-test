@@ -6,15 +6,17 @@ audio is procedurally generated.
 
 ![hip](screenshots/hip.png)
 ![ads](screenshots/ads.png)
+![reload](screenshots/reload.png)
 
 ## Play
 
 - Web build: `docs/` (deployed by `.github/workflows/pages.yml` to GitHub Pages on
   pushes to `main`; enable Pages with source "GitHub Actions" in the repo settings).
 - Add `?low` to the URL to disable shadows and MSAA on weak GPUs.
-- Controls: WASD move, Shift sprint, RMB aim, LMB fire, R reload, 1/2/Q or wheel to
-  swap, C crouch, Space jump, E start the course on the white pad, Enter restart,
-  Esc release the mouse.
+- Controls: WASD move, Shift sprint, Shift again (or double-tap) tactical sprint,
+  C while sprinting to slide (Space cancels into a jump), RMB aim, LMB fire,
+  R reload, 1/2/Q or wheel to swap, C crouch, Space jump, E start the course on
+  the white pad, Enter restart, Esc release the mouse.
 
 ## Build
 
@@ -27,10 +29,14 @@ godot --headless --path . --export-release "Web" docs/index.html
 ## Test
 
 ```bash
-godot --headless --path . -- --autotest                # 40 gameplay/timing checks
+godot --headless --path . -- --autotest                # 126 gameplay/timing/animation checks
 python3 -m http.server 8765 --directory docs &          # then:
-SHOTS=/tmp/shots node tests/verify_web.js               # headless Chromium (Playwright)
+SHOTS=/tmp/shots node tests/verify_web.js               # headless Chromium (Playwright): input, FX, size cap, fps floor
 ```
 
-See `NOTES.md` for what is closest to the reference feel, what is missing and the
-three changes that would close the gap most.
+Tuning lives in three tables: `scripts/weapons.gd` (per-weapon gunplay, rig anchors,
+audio/shake), `scripts/movement.gd` (speeds, tactical sprint, slide, FOV kicks) and
+`scripts/anims.gd` (clip shapes; lengths come from the weapon tables).
+
+See `NOTES.md` for what is closest to the reference feel, what each pass changed, and
+the next three changes that would close the gap most.
