@@ -9,17 +9,14 @@ signal ammo_changed
 signal weapon_changed(def: Dictionary)
 
 const Weapons := preload("res://scripts/weapons.gd")
+const Movement := preload("res://scripts/movement.gd")
 
 const BASE_FOV := 80.0
-const WALK_SPEED := 5.0
-const SPRINT_SPEED := 7.4
-const CROUCH_MULT := 0.5
-const JUMP_VEL := 4.4
-const GRAVITY := 17.0
 const SENS := 0.0021
 const STAND_H := 1.62
 const CROUCH_H := 1.05
 
+var mv: Dictionary = Movement.table()
 var defs: Array = []
 var weapon_index := 0
 var def: Dictionary
@@ -38,6 +35,19 @@ var ads_held := false
 var sprinting := false
 var sprint_amount := 0.0
 var sprint_out_timer := 0.0
+var sprint_time := 0.0
+var tac_sprinting := false
+var tac_amount := 0.0
+var tac_t := 0.0
+var tac_rearm_t := 0.0
+var tac_request_t := -10.0
+var last_sprint_press_t := -10.0
+var sliding := false
+var slide_t := 0.0
+var slide_dir := Vector3.ZERO
+var slide_cooldown_t := 0.0
+var slide_amount := 0.0
+var fov_kick := 0.0
 var fire_cooldown := 0.0
 var trigger_held := false
 var trigger_edge := false
@@ -207,8 +217,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		_request_swap(1)
 	if event.is_action_pressed("swap"):
 		_request_swap((weapon_index + 1) % defs.size())
+	if event.is_action_pressed("sprint") and not event.is_echo():
+		# Second tap inside the window, or a tap while already sprinting, asks for tactical sprint.
+		if sprinting or (t - last_sprint_press_t) < mv.double_tap_window:
+			tac_request_t = t
+		last_sprint_press_t = t
 	if event.is_action_pressed("crouch"):
-		crouching = not crouching
+		if sprinting and is_on_floor() and slide_cooldown_t <= 0.0 and sprint_time >= mv.slide_min_sprint:
+			_start_slide()
+		elif not sliding:
+			crouching = not crouching
 
 
 func _request_swap(i: int) -> void:
@@ -233,6 +251,25 @@ func _request_reload() -> void:
 	reload_empty = a.mag == 0
 	reload_flags = {}
 	ads_held = false
+	tac_sprinting = false
+
+
+func _start_slide() -> void:
+	sliding = true
+	slide_t = 0.0
+	var h := Vector3(velocity.x, 0, velocity.z)
+	slide_dir = h.normalized() if h.length() > 0.5 else Basis(Vector3.UP, yaw) * Vector3.FORWARD
+	# Slide keeps the sprint's heading; it is a committed burst, no steering.
+	sprinting = false
+	tac_sprinting = false
+	sprint_out_timer = 0.0  # the slide fire-lock replaces sprint-to-fire
+	crouching = true
+	Sfx.play("footstep", -8.0, 0.6, 0.05)
+
+
+func _end_slide() -> void:
+	sliding = false
+	slide_cooldown_t = mv.slide_cooldown
 
 
 func _physics_process(delta: float) -> void:
@@ -242,28 +279,65 @@ func _physics_process(delta: float) -> void:
 		fwd = 0.0
 		side = 0.0
 	var wish := Vector2(side, fwd).limit_length(1.0)
+	slide_cooldown_t = maxf(0.0, slide_cooldown_t - delta)
+	tac_rearm_t = maxf(0.0, tac_rearm_t - delta)
+
+	if sliding:
+		# Committed burst along the sprint heading with a friction curve; jump cancels.
+		slide_t += delta
+		var k := clampf(slide_t / mv.slide_duration, 0.0, 1.0)
+		var v: float = lerpf(mv.slide_speed, mv.slide_end_speed, smoothstep(0.0, 1.0, k))
+		velocity.x = slide_dir.x * v
+		velocity.z = slide_dir.z * v
+		if input_enabled and Input.is_action_just_pressed("jump") and is_on_floor():
+			_end_slide()
+			crouching = false
+			velocity.y = mv.jump_vel
+		elif slide_t >= mv.slide_duration or not is_on_floor():
+			_end_slide()
+		if not is_on_floor():
+			velocity.y -= mv.gravity * delta
+		move_and_slide()
+		return
+
 	# Firing (or trying to) always suppresses sprint, so holding Shift+LMB shoots.
 	var want_sprint := input_enabled and Input.is_action_pressed("sprint") and fwd > 0.3 and not ads_held and not crouching and is_on_floor() and not trigger_held
 	if want_sprint and not sprinting:
 		sprinting = true
+		sprint_time = 0.0
 	elif not want_sprint and sprinting:
 		sprinting = false
-		sprint_out_timer = def.sprint_to_fire
-	var speed := WALK_SPEED
+		sprint_out_timer = def.tac_sprint_to_fire if tac_sprinting else def.sprint_to_fire
+		tac_sprinting = false
 	if sprinting:
-		speed = SPRINT_SPEED
+		sprint_time += delta
+		# Tactical sprint: requested by a double tap, limited duration, needs re-arming.
+		if not tac_sprinting and (t - tac_request_t) < 0.35 and tac_rearm_t <= 0.0:
+			tac_sprinting = true
+			tac_t = 0.0
+			tac_request_t = -10.0
+		if tac_sprinting:
+			tac_t += delta
+			if tac_t >= mv.tac_duration:
+				tac_sprinting = false
+				tac_rearm_t = mv.tac_rearm
+	var speed: float = mv.walk_speed
+	if tac_sprinting:
+		speed = mv.tac_sprint_speed
+	elif sprinting:
+		speed = mv.sprint_speed
 	speed *= lerpf(1.0, def.ads_move_mult, ads_amount)
-	speed *= lerpf(1.0, CROUCH_MULT, crouch_amount)
+	speed *= lerpf(1.0, mv.crouch_mult, crouch_amount)
 	var basis := Basis(Vector3.UP, yaw)
 	var dir := (basis * Vector3(wish.x, 0, -wish.y))
-	var accel := 60.0 if is_on_floor() else 12.0
+	var accel: float = mv.accel_ground if is_on_floor() else mv.accel_air
 	var target_v := dir * speed
 	velocity.x = move_toward(velocity.x, target_v.x, accel * delta)
 	velocity.z = move_toward(velocity.z, target_v.z, accel * delta)
 	if not is_on_floor():
-		velocity.y -= GRAVITY * delta
+		velocity.y -= mv.gravity * delta
 	elif input_enabled and Input.is_action_just_pressed("jump") and not crouching:
-		velocity.y = JUMP_VEL
+		velocity.y = mv.jump_vel
 	move_and_slide()
 
 
@@ -275,13 +349,23 @@ func _process(delta: float) -> void:
 	sprint_out_timer = maxf(0.0, sprint_out_timer - delta)
 	spread_bloom = maxf(0.0, spread_bloom - def.bloom_decay * delta * (0.5 + spread_bloom))
 	sprint_amount = move_toward(sprint_amount, 1.0 if sprinting else 0.0, delta / 0.18)
-	crouch_amount = move_toward(crouch_amount, 1.0 if crouching else 0.0, delta / 0.22)
+	tac_amount = move_toward(tac_amount, 1.0 if tac_sprinting else 0.0, delta / 0.16)
+	slide_amount = move_toward(slide_amount, 1.0 if sliding else 0.0, delta / 0.12)
+	crouch_amount = move_toward(crouch_amount, 1.0 if crouching else 0.0, delta / (0.1 if sliding else 0.22))
 
-	# --- ADS ------------------------------------------------------------------
+	# --- ADS + FOV ------------------------------------------------------------
 	var can_ads := input_enabled and ads_held and not sprinting and not reloading and not swapping
 	ads_amount = move_toward(ads_amount, 1.0 if can_ads else 0.0, delta / def.ads_time)
 	var ads_c := smoothstep(0.0, 1.0, ads_amount)
-	camera.fov = lerpf(BASE_FOV, BASE_FOV * def.ads_fov, ads_c) + sprint_amount * 4.0
+	var kick_target := 0.0
+	if tac_sprinting:
+		kick_target = mv.fov_tac
+	elif sprinting:
+		kick_target = mv.fov_sprint
+	if sliding:
+		kick_target += mv.fov_slide * (1.0 - clampf(slide_t / mv.slide_duration, 0.0, 1.0))
+	fov_kick = lerpf(fov_kick, kick_target, 1.0 - exp(-mv.fov_damp * delta))
+	camera.fov = lerpf(BASE_FOV + fov_kick, BASE_FOV * def.ads_fov, ads_c)
 
 	# --- reload -----------------------------------------------------------------
 	if reloading:
@@ -323,6 +407,8 @@ func _process(delta: float) -> void:
 	# --- fire ---------------------------------------------------------------------
 	var wants_fire := trigger_held if def.auto else trigger_edge
 	var blocked := reloading or swapping or sprinting or sprint_out_timer > 0.0 or not input_enabled
+	if sliding and slide_t < mv.slide_fire_lock:
+		blocked = true
 	if wants_fire and not blocked and fire_cooldown <= 0.0:
 		var a: Dictionary = ammo[def.id]
 		if a.mag > 0:
@@ -349,8 +435,10 @@ func _process(delta: float) -> void:
 	var aim_sway := Vector2(sin(t * 0.7) * 0.0011 + sin(t * 1.9) * 0.0005, sin(t * 1.1) * 0.0009) * ads_c
 	recoil_pivot.rotation = Vector3(deg_to_rad(recoil_current.x) + aim_sway.x, deg_to_rad(recoil_current.y) + aim_sway.y, 0.0)
 	rotation.y = yaw
+	var slide_curve := sin(clampf(slide_t / mv.slide_duration, 0.0, 1.0) * PI) * slide_amount
 	head.rotation.x = pitch
-	head.position.y = lerpf(STAND_H, CROUCH_H, crouch_amount)
+	head.rotation.z = -mv.slide_cam_roll * slide_curve
+	head.position.y = lerpf(STAND_H, CROUCH_H, crouch_amount) - mv.slide_cam_dip * slide_curve
 	capsule.height = lerpf(1.8, 1.3, crouch_amount)
 	shape.position.y = capsule.height * 0.5
 
@@ -359,6 +447,10 @@ func _process(delta: float) -> void:
 	var rot := Vector3.ZERO
 	pos = pos.lerp(def.sprint_pos, sprint_amount)
 	rot = rot.lerp(def.sprint_rot, sprint_amount)
+	pos = pos.lerp(def.tac_pos, tac_amount)
+	rot = rot.lerp(def.tac_rot, tac_amount)
+	pos = pos.lerp(def.slide_pos, slide_amount * (1.0 - ads_c))
+	rot = rot.lerp(def.slide_rot, slide_amount * (1.0 - ads_c))
 	if reloading:
 		var total: float = def.reload_time + (def.empty_extra if reload_empty else 0.0)
 		var p := clampf(reload_t / total, 0.0, 1.0)
@@ -384,13 +476,13 @@ func _process(delta: float) -> void:
 	sway_pos = sway_pos.lerp(target_pos, 1.0 - exp(-9.0 * delta))
 	var hspeed := Vector2(velocity.x, velocity.z).length()
 	var moving := hspeed > 0.5 and is_on_floor()
-	var bob_hz := 1.9 + 0.9 * sprint_amount
+	var bob_hz := 1.9 + 0.9 * sprint_amount + 0.5 * tac_amount
 	if moving:
 		var prev := bob_phase
 		bob_phase += delta * TAU * bob_hz
 		if floori(prev / PI) != floori(bob_phase / PI):
 			Sfx.play("footstep", -18.0 + 5.0 * sprint_amount, 1.0, 0.12)
-	bob_amp = move_toward(bob_amp, (0.012 + 0.016 * sprint_amount) * (1.0 - 0.85 * ads_c) if moving else 0.0, delta * 0.08)
+	bob_amp = move_toward(bob_amp, (0.012 + 0.016 * sprint_amount + 0.01 * tac_amount) * (1.0 - 0.85 * ads_c) * (1.0 - slide_amount) if moving else 0.0, delta * 0.08)
 	var bob := Vector3(sin(bob_phase) * bob_amp, -abs(sin(bob_phase)) * bob_amp * 0.6 + sin(bob_phase * 2.0) * bob_amp * 0.2, 0.0)
 	var breathe := Vector3(sin(t * 0.9) * 0.0018, sin(t * 1.6) * 0.0012, 0.0) * (1.0 - 0.75 * ads_c)
 	sway_pivot.rotation = sway_rot + Vector3(0, 0, sin(bob_phase) * bob_amp * 0.9)
@@ -423,8 +515,10 @@ func _spring(delta: float, k: float, damp: float) -> void:
 func current_spread() -> float:
 	var s := lerpf(def.hip_spread, def.ads_spread, smoothstep(0.0, 1.0, ads_amount))
 	var hspeed := Vector2(velocity.x, velocity.z).length()
-	s += def.move_spread * clampf(hspeed / WALK_SPEED, 0.0, 1.3) * (1.0 - 0.7 * ads_amount)
+	s += def.move_spread * clampf(hspeed / mv.walk_speed, 0.0, 1.3) * (1.0 - 0.7 * ads_amount)
 	s += spread_bloom * (1.0 - 0.6 * ads_amount)
+	if sliding:
+		s += mv.slide_spread
 	if not is_on_floor():
 		s += 2.5
 	s *= lerpf(1.0, 0.8, crouch_amount)

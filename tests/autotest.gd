@@ -216,5 +216,141 @@ func _run() -> void:
 	await wait(0.3)
 	check("enter restarts to practice", main.state == main.State.PRACTICE and main.range_targets.filter(func(x): return x.is_up).size() == 9)
 
+	await _movement_tests()
+
 	print("AUTOTEST %d/%d checks passed" % [checks - fails, checks])
 	get_tree().quit(1 if fails > 0 else 0)
+
+
+func hspeed() -> float:
+	return Vector2(player.velocity.x, player.velocity.z).length()
+
+
+func reset_player() -> void:
+	key(KEY_W, false)
+	key(KEY_SHIFT, false)
+	mouse(MOUSE_BUTTON_LEFT, false)
+	mouse(MOUSE_BUTTON_RIGHT, false)
+	# Clear lane down the range (the spawn pad has a bench right in front of it).
+	player.position = Vector3(3.0, 0.1, -3.0)
+	player.velocity = Vector3.ZERO
+	player.yaw = 0.0
+	player.pitch = 0.0
+	player.crouching = false
+	player.sliding = false
+	player.slide_cooldown_t = 0.0
+	player.tac_rearm_t = 0.0
+	await wait(0.4)
+
+
+## Step 2 (pass 2): tactical sprint, slide, FOV kicks.
+func _movement_tests() -> void:
+	var mv: Dictionary = player.mv
+	await reset_player()
+	# Regular sprint.
+	key(KEY_SHIFT, true)
+	key(KEY_W, true)
+	await wait(0.9)
+	check("sprint speed matches table", absf(hspeed() - mv.sprint_speed) < 0.3, "v=%.2f" % hspeed())
+	check("sprint FOV kick +%.0f" % mv.fov_sprint, absf(player.camera.fov - (80.0 + mv.fov_sprint)) < 0.5 and not player.tac_sprinting, "fov=%.2f" % player.camera.fov)
+	# Shift again while sprinting -> tactical sprint.
+	key(KEY_SHIFT, false)
+	key(KEY_SHIFT, true)
+	await wait(0.7)
+	check("shift again while sprinting -> tactical sprint", player.tac_sprinting, "")
+	check("tac sprint speed matches table", absf(hspeed() - mv.tac_sprint_speed) < 0.3, "v=%.2f" % hspeed())
+	check("tac sprint FOV kick +%.0f" % mv.fov_tac, absf(player.camera.fov - (80.0 + mv.fov_tac)) < 0.5, "fov=%.2f" % player.camera.fov)
+	check("tac sprint raises the weapon", player.weapon_root.rotation.x > 0.6, "rot.x=%.2f" % player.weapon_root.rotation.x)
+	# ADS ends tactical sprint.
+	mouse(MOUSE_BUTTON_RIGHT, true)
+	await wait(0.3)
+	check("ADS ends tactical sprint", not player.tac_sprinting and not player.sprinting)
+	mouse(MOUSE_BUTTON_RIGHT, false)
+	key(KEY_W, false)
+	key(KEY_SHIFT, false)
+	await wait(0.7)
+	check("FOV restores on stop", absf(player.camera.fov - 80.0) < 0.4, "fov=%.2f" % player.camera.fov)
+	await reset_player()
+	# Double tap inside the window.
+	key(KEY_W, true)
+	key(KEY_SHIFT, true)
+	await tick
+	key(KEY_SHIFT, false)
+	await wait(0.12)
+	key(KEY_SHIFT, true)
+	await wait(0.7)
+	check("double-tap inside window -> tactical sprint", player.tac_sprinting)
+	await reset_player()
+	# Two taps outside the window -> regular sprint only.
+	key(KEY_W, true)
+	key(KEY_SHIFT, true)
+	await tick
+	key(KEY_SHIFT, false)
+	await wait(mv.double_tap_window + 0.3)
+	key(KEY_SHIFT, true)
+	await wait(0.7)
+	check("taps outside window -> regular sprint only", player.sprinting and not player.tac_sprinting)
+	# Tactical sprint-to-fire delay (rifle 0.42 s vs 0.28 s regular).
+	key(KEY_SHIFT, false)
+	key(KEY_SHIFT, true)
+	await wait(0.6)
+	check("tac sprint re-engaged", player.tac_sprinting)
+	var s0: int = player.stats.shots
+	mouse(MOUSE_BUTTON_LEFT, true)
+	await wait(0.32)
+	check("no shot 0.32 s after trigger from tac sprint", player.stats.shots == s0 and not player.sprinting, "sprint_out=%.2f" % player.sprint_out_timer)
+	await wait(0.25)
+	check("fires after tac sprint-to-fire (%.2f s)" % player.def.tac_sprint_to_fire, player.stats.shots > s0, "shots=%d" % (player.stats.shots - s0))
+	mouse(MOUSE_BUTTON_LEFT, false)
+	await reset_player()
+	# Slide.
+	key(KEY_W, true)
+	key(KEY_SHIFT, true)
+	await wait(0.5)
+	await press(KEY_C)
+	await wait(0.04)
+	check("crouch while sprinting starts a slide", player.sliding and player.crouching and not player.sprinting)
+	check("slide launches faster than sprint", hspeed() > mv.sprint_speed + 0.5, "v=%.2f" % hspeed())
+	check("slide keeps a FOV kick", player.camera.fov > 82.0, "fov=%.2f" % player.camera.fov)
+	s0 = player.stats.shots
+	mouse(MOUSE_BUTTON_LEFT, true)
+	await wait(0.06)
+	check("no fire in the first %.0f ms of a slide" % (mv.slide_fire_lock * 1000.0), player.stats.shots == s0, "shots=%d" % (player.stats.shots - s0))
+	await wait(0.25)
+	check("fires from slide after the lockout", player.stats.shots > s0, "shots=%d" % (player.stats.shots - s0))
+	check("slide adds spread", player.current_spread() > player.def.hip_spread + mv.slide_spread, "spread=%.2f" % player.current_spread())
+	mouse(MOUSE_BUTTON_LEFT, false)
+	await wait(0.6)
+	check("slide ends after %.1f s, stays crouched" % mv.slide_duration, not player.sliding and player.crouching and player.slide_cooldown_t > 0.0, "cd=%.2f" % player.slide_cooldown_t)
+	check("slide decelerates on the friction curve", hspeed() < mv.slide_end_speed + 1.0, "v=%.2f" % hspeed())
+	# Cooldown: uncrouch, sprint, crouch again too early -> plain crouch, no slide.
+	await press(KEY_C)
+	await wait(0.3)
+	await press(KEY_C)
+	await wait(0.05)
+	check("slide on cooldown -> no slide", not player.sliding, "cd=%.2f" % player.slide_cooldown_t)
+	await press(KEY_C)
+	await wait(1.1)
+	await press(KEY_C)
+	await wait(0.04)
+	check("slide available after cooldown", player.sliding)
+	# Jump cancels the slide.
+	key(KEY_SPACE, true)
+	await wait(0.06)
+	key(KEY_SPACE, false)
+	check("jump cancels slide", not player.sliding and player.velocity.y > 1.0 and not player.crouching, "vy=%.2f" % player.velocity.y)
+	await reset_player()
+	# ADS during a slide: ADS FOV wins over the kick.
+	key(KEY_W, true)
+	key(KEY_SHIFT, true)
+	await wait(0.5)
+	await press(KEY_C)
+	mouse(MOUSE_BUTTON_RIGHT, true)
+	await wait(0.4)
+	check("ADS from slide overrides the FOV kick", player.ads_amount > 0.95 and absf(player.camera.fov - 57.6) < 0.5, "fov=%.2f ads=%.2f" % [player.camera.fov, player.ads_amount])
+	mouse(MOUSE_BUTTON_RIGHT, false)
+	key(KEY_W, false)
+	key(KEY_SHIFT, false)
+	await wait(1.0)
+	check("FOV back to base after slide + ADS", absf(player.camera.fov - 80.0) < 0.4, "fov=%.2f" % player.camera.fov)
+	await reset_player()
